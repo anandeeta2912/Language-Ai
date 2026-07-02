@@ -5,8 +5,12 @@ import os
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 app = Flask(__name__)
+
+BASE_DIR = Path(__file__).resolve().parent
+FRONTEND_DIR = BASE_DIR.parent / "src"
 
 ENDPOINT = os.environ.get("LANGUAGE_ENDPOINT", "").rstrip("/")
 KEY = os.environ.get("LANGUAGE_KEY", "")
@@ -21,7 +25,12 @@ MAX_CHARS = 5000
 
 @app.get("/")
 def index():
-    return send_from_directory("..\\src", "index.html")
+    return send_from_directory(str(FRONTEND_DIR), "index.html")
+
+
+@app.get("/<path:path>")
+def static_files(path):
+    return send_from_directory(str(FRONTEND_DIR), path)
 
 
 @app.post("/api/analyze")
