@@ -1,2 +1,5 @@
 azure-functions
 six>=1.16.0
+azure-ai-textanalytics
+azure-core
+azure-functions

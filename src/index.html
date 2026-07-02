@@ -251,6 +251,33 @@
   .entity-chip .cat{ color: var(--highlight); margin-left: 4px; }
   .entity-empty{ color: var(--ink-soft); }
 
+  .language-block,
+  .pii-block,
+  .summary-block{
+    margin-top: 22px;
+  }
+  .language-value{
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    color: var(--ink);
+  }
+  .redacted-text{
+    line-height: 1.6;
+    font-size: 0.98rem;
+    white-space: pre-wrap;
+    font-family: var(--mono);
+    background: rgba(30,59,47,0.06);
+    padding: 12px 14px;
+    border-radius: var(--radius);
+    border-left: 3px solid var(--rule);
+  }
+  .summary-text{
+    line-height: 1.65;
+    font-size: 1.02rem;
+    white-space: pre-wrap;
+  }
+  .result-empty{ color: var(--ink-soft); }
+
   .foot{
     text-align:center;
     padding: 18px 20px 32px;
@@ -327,6 +354,23 @@
           <p class="sheet-label">named entities</p>
           <div id="entityList" class="entity-list mono small"></div>
         </div>
+
+        <div class="language-block">
+          <p class="sheet-label">detected language</p>
+          <p id="languageValue" class="language-value"></p>
+        </div>
+
+        <div class="pii-block">
+          <p class="sheet-label">PII detection &amp; redaction</p>
+          <div id="piiEntityList" class="entity-list mono small"></div>
+          <p class="sheet-label" style="margin-top: 14px;">redacted copy</p>
+          <p id="redactedText" class="redacted-text"></p>
+        </div>
+
+        <div class="summary-block">
+          <p class="sheet-label">abstractive summary</p>
+          <p id="summaryText" class="summary-text"></p>
+        </div>
       </div>
     </section>
 
@@ -334,7 +378,7 @@
   </main>
 
   <footer class="foot">
-    <p class="mono tiny">Built on Azure AI Language &middot; sentiment, key phrases &amp; entities &middot; Python backend on Azure</p>
+    <p class="mono tiny">Built on Azure AI Language &middot; sentiment, key phrases, entities, language, PII &amp; summarization &middot; Python backend on Azure</p>
   </footer>
 
 <script>
@@ -347,6 +391,10 @@
   const stampBadge = document.getElementById('stampBadge');
   const markedText = document.getElementById('markedText');
   const entityList = document.getElementById('entityList');
+  const languageValue = document.getElementById('languageValue');
+  const piiEntityList = document.getElementById('piiEntityList');
+  const redactedText = document.getElementById('redactedText');
+  const summaryText = document.getElementById('summaryText');
   const barPos = document.getElementById('barPos');
   const barNeu = document.getElementById('barNeu');
   const barNeg = document.getElementById('barNeg');
@@ -373,7 +421,7 @@
     setLoading(true);
 
     try {
-      const res = await fetch('/api/analyze', {
+      const res = await fetch('http://localhost:7073/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text })
@@ -404,7 +452,16 @@
   }
 
   function renderResults(originalText, data) {
-    const { sentiment, confidenceScores, keyPhrases, entities } = data;
+    const {
+      sentiment,
+      confidenceScores,
+      keyPhrases,
+      entities,
+      language,
+      piiEntities,
+      redactedText: redactedCopy,
+      summary
+    } = data;
 
     stampBadge.textContent = sentiment.toUpperCase();
     stampBadge.className = 'stamp ' + sentiment.toLowerCase();
@@ -418,16 +475,41 @@
 
     markedText.innerHTML = highlightPhrases(originalText, keyPhrases || []);
 
-    if (entities && entities.length) {
-      entityList.innerHTML = entities
-        .map(e => `<span class="entity-chip">${escapeHtml(e.text)}<span class="cat">${escapeHtml(e.category)}</span></span>`)
-        .join('');
+    entityList.innerHTML = renderEntityChips(entities, 'no named entities found');
+
+    if (language && language.name) {
+      const code = language.iso6391Name || language.name;
+      const confidence = Math.round((language.confidenceScore || 0) * 100);
+      languageValue.textContent = `${language.name} (${code}) — ${confidence}% confidence`;
     } else {
-      entityList.innerHTML = '<span class="entity-empty">no named entities found</span>';
+      languageValue.innerHTML = '<span class="result-empty">language could not be detected</span>';
+    }
+
+    piiEntityList.innerHTML = renderEntityChips(piiEntities, 'no PII detected');
+
+    if (redactedCopy) {
+      redactedText.textContent = redactedCopy;
+    } else {
+      redactedText.innerHTML = '<span class="result-empty">no redacted text available</span>';
+    }
+
+    if (summary) {
+      summaryText.textContent = summary;
+    } else {
+      summaryText.innerHTML = '<span class="result-empty">no summary available</span>';
     }
 
     resultsSheet.hidden = false;
     resultsSheet.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function renderEntityChips(items, emptyLabel) {
+    if (items && items.length) {
+      return items
+        .map(e => `<span class="entity-chip">${escapeHtml(e.text)}<span class="cat">${escapeHtml(e.category)}</span></span>`)
+        .join('');
+    }
+    return `<span class="entity-empty">${escapeHtml(emptyLabel)}</span>`;
   }
 
   function highlightPhrases(text, phrases) {

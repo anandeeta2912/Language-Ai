@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 
@@ -12,14 +13,17 @@ ENDPOINT = os.environ.get("LANGUAGE_ENDPOINT", "").rstrip("/")
 KEY = os.environ.get("LANGUAGE_KEY", "")
 
 API_VERSION = "2023-04-01"
+SUMMARIZATION_API_VERSION = "2023-04-01"
 TIMEOUT_SECONDS = 20
+SUMMARIZATION_POLL_INTERVAL_SECONDS = 1
+SUMMARIZATION_MAX_WAIT_SECONDS = 60
 MAX_CHARS = 5000
 
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     endpoint = os.environ.get("LANGUAGE_ENDPOINT", "").rstrip("/")
     key = os.environ.get("LANGUAGE_KEY", "")
-    if not endpoint or not key :
+    if not endpoint or not key:
         return _json_response(
             {"error": "Server is missing LANGUAGE_ENDPOINT / LANGUAGE_KEY environment variables."},
             500,
@@ -43,44 +47,132 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception:
         logging.exception("Azure AI Language call failed")
         return _json_response(
-            {"error": "Azure AI Language request failed. Check key/endpoint/quota."}, 502
+            {"error": "Azure AI Language request failed. Check key/endpoint/quota."},
+            502,
         )
 
+    language_info: dict = {}
+    try:
+        language_doc = _call_language("LanguageDetection", text, language=None)["results"]["documents"][0]
+        language_info = language_doc.get("detectedLanguage", {})
+    except Exception:
+        logging.exception("Language detection failed")
+
+    pii_entities: list = []
+    redacted_text = ""
+    try:
+        pii_doc = _call_language("PiiEntityRecognition", text, language=None)["results"]["documents"][0]
+        pii_entities = [
+            {"text": e["text"], "category": e["category"]}
+            for e in pii_doc.get("entities", [])
+        ]
+        redacted_text = pii_doc.get("redactedText", "")
+    except Exception:
+        logging.exception("PII detection failed")
+
+    summary_text = ""
+    try:
+        summary_text = _call_abstractive_summarization(text)
+    except Exception:
+        logging.exception("Abstractive summarization failed")
+
     result = {
-        "sentiment": sentiment_doc["sentiment"],  # positive | negative | neutral | mixed
+        "sentiment": sentiment_doc["sentiment"],
         "confidenceScores": sentiment_doc["confidenceScores"],
         "keyPhrases": keyphrase_doc.get("keyPhrases", []),
         "entities": [
             {"text": e["text"], "category": e["category"]}
             for e in entity_doc.get("entities", [])
         ],
+        "language": language_info,
+        "piiEntities": pii_entities,
+        "redactedText": redacted_text,
+        "summary": summary_text,
     }
     return _json_response(result, 200)
 
 
-def _call_language(kind: str, text: str) -> dict:
+def _call_language(kind: str, text: str, *, language: str | None = "en") -> dict:
     url = f"{ENDPOINT}/language/:analyze-text?api-version={API_VERSION}"
+    document: dict = {"id": "1", "text": text}
+    if language:
+        document["language"] = language
     payload = {
         "kind": kind,
         "parameters": {"modelVersion": "latest"},
-        "analysisInput": {"documents": [{"id": "1", "language": "en", "text": text}]},
+        "analysisInput": {"documents": [document]},
     }
-    data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Ocp-Apim-Subscription-Key": KEY,
+    return _request_json("POST", url, payload)
+
+
+def _call_abstractive_summarization(text: str) -> str:
+    submit_url = f"{ENDPOINT}/language/analyze-text/jobs?api-version={SUMMARIZATION_API_VERSION}"
+    payload = {
+        "displayName": "Text Abstractive Summarization",
+        "analysisInput": {
+            "documents": [{"id": "1", "language": "en", "text": text}],
         },
-        method="POST",
-    )
+        "tasks": [
+            {
+                "kind": "AbstractiveSummarization",
+                "taskName": "summarize",
+            }
+        ],
+    }
+    _, headers = _request_json("POST", submit_url, payload, return_headers=True)
+    status_url = headers.get("operation-location") or headers.get("Operation-Location")
+    if not status_url:
+        raise RuntimeError("Summarization job did not return operation-location header.")
+
+    deadline = time.monotonic() + SUMMARIZATION_MAX_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        job = _request_json("GET", status_url)
+        status = job.get("status", "")
+        if status == "succeeded":
+            return _extract_summary_text(job)
+        if status in ("failed", "cancelled"):
+            errors = job.get("errors") or []
+            raise RuntimeError(f"Summarization job {status}: {errors}")
+        time.sleep(SUMMARIZATION_POLL_INTERVAL_SECONDS)
+
+    raise RuntimeError("Summarization job timed out.")
+
+
+def _extract_summary_text(job: dict) -> str:
+    items = (job.get("tasks") or {}).get("items") or []
+    for item in items:
+        documents = (item.get("results") or {}).get("documents") or []
+        for document in documents:
+            summaries = document.get("summaries") or []
+            if summaries:
+                return summaries[0].get("text", "")
+    return ""
+
+
+def _request_json(
+    method: str,
+    url: str,
+    payload: dict | None = None,
+    *,
+    return_headers: bool = False,
+) -> dict | tuple[dict, dict]:
+    data = None
+    headers = {
+        "Content-Type": "application/json",
+        "Ocp-Apim-Subscription-Key": KEY,
+    }
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            body = json.loads(resp.read().decode("utf-8"))
+            if return_headers:
+                return body, dict(resp.headers)
+            return body
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "ignore")
-        raise RuntimeError(f"{kind} failed: {exc.code} {detail}") from exc
+        raise RuntimeError(f"{method} {url} failed: {exc.code} {detail}") from exc
 
 
 def _json_response(payload: dict, status: int) -> func.HttpResponse:
