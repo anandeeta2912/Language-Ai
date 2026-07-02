@@ -3,6 +3,7 @@ services:
     name: review-analyser
     runtime: python
     plan: free
+    rootDir: webapp
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
     envVars:

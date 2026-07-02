@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 import json
 import logging
 import os
@@ -17,6 +17,11 @@ TIMEOUT_SECONDS = 20
 SUMMARIZATION_POLL_INTERVAL_SECONDS = 1
 SUMMARIZATION_MAX_WAIT_SECONDS = 60
 MAX_CHARS = 5000
+
+
+@app.get("/")
+def index():
+    return send_from_directory("..\\src", "index.html")
 
 
 @app.post("/api/analyze")
