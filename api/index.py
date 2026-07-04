@@ -1,3 +1,4 @@
+from flask import Flask, request, jsonify
 import json
 import logging
 import os
@@ -5,10 +6,8 @@ import time
 import urllib.error
 import urllib.request
 
-import azure.functions as func
+app = Flask(__name__)
 
-# Read these from Azure environment variables / application settings —
-# never hard-code the key here.
 ENDPOINT = os.environ.get("LANGUAGE_ENDPOINT", "").rstrip("/")
 KEY = os.environ.get("LANGUAGE_KEY", "")
 
@@ -20,25 +19,19 @@ SUMMARIZATION_MAX_WAIT_SECONDS = 60
 MAX_CHARS = 5000
 
 
-def main(req: func.HttpRequest) -> func.HttpResponse:
+@app.post("/api/analyze")
+def analyze():
     endpoint = os.environ.get("LANGUAGE_ENDPOINT", "").rstrip("/")
     key = os.environ.get("LANGUAGE_KEY", "")
     if not endpoint or not key:
-        return _json_response(
-            {"error": "Server is missing LANGUAGE_ENDPOINT / LANGUAGE_KEY environment variables."},
-            500,
-        )
+        return jsonify({"error": "Server is missing LANGUAGE_ENDPOINT / LANGUAGE_KEY environment variables."}), 500
 
-    try:
-        body = req.get_json()
-    except ValueError:
-        body = {}
-
+    body = request.get_json(silent=True) or {}
     text = (body.get("text") or "").strip()
     if not text:
-        return _json_response({"error": 'Request body must include non-empty "text".'}, 400)
+        return jsonify({"error": 'Request body must include non-empty "text".'}), 400
     if len(text) > MAX_CHARS:
-        return _json_response({"error": f"Text must be {MAX_CHARS} characters or fewer."}, 400)
+        return jsonify({"error": f"Text must be {MAX_CHARS} characters or fewer."}), 400
 
     try:
         sentiment_doc = _call_language("SentimentAnalysis", text)["results"]["documents"][0]
@@ -46,19 +39,16 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         entity_doc = _call_language("EntityRecognition", text)["results"]["documents"][0]
     except Exception:
         logging.exception("Azure AI Language call failed")
-        return _json_response(
-            {"error": "Azure AI Language request failed. Check key/endpoint/quota."},
-            502,
-        )
+        return jsonify({"error": "Azure AI Language request failed. Check key/endpoint/quota."}), 502
 
-    language_info: dict = {}
+    language_info = {}
     try:
         language_doc = _call_language("LanguageDetection", text, language=None)["results"]["documents"][0]
         language_info = language_doc.get("detectedLanguage", {})
     except Exception:
         logging.exception("Language detection failed")
 
-    pii_entities: list = []
+    pii_entities = []
     redacted_text = ""
     try:
         pii_doc = _call_language("PiiEntityRecognition", text, language=None)["results"]["documents"][0]
@@ -89,12 +79,12 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         "redactedText": redacted_text,
         "summary": summary_text,
     }
-    return _json_response(result, 200)
+    return jsonify(result)
 
 
-def _call_language(kind: str, text: str, *, language: str | None = "en") -> dict:
+def _call_language(kind: str, text: str, *, language: str = "en") -> dict:
     url = f"{ENDPOINT}/language/:analyze-text?api-version={API_VERSION}"
-    document: dict = {"id": "1", "text": text}
+    document = {"id": "1", "text": text}
     if language:
         document["language"] = language
     payload = {
@@ -149,13 +139,7 @@ def _extract_summary_text(job: dict) -> str:
     return ""
 
 
-def _request_json(
-    method: str,
-    url: str,
-    payload: dict | None = None,
-    *,
-    return_headers: bool = False,
-) -> dict | tuple[dict, dict]:
+def _request_json(method: str, url: str, payload: dict | None = None, *, return_headers: bool = False):
     data = None
     headers = {
         "Content-Type": "application/json",
@@ -163,9 +147,9 @@ def _request_json(
     }
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as resp:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
             body = json.loads(resp.read().decode("utf-8"))
             if return_headers:
                 return body, dict(resp.headers)
@@ -173,11 +157,3 @@ def _request_json(
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "ignore")
         raise RuntimeError(f"{method} {url} failed: {exc.code} {detail}") from exc
-
-
-def _json_response(payload: dict, status: int) -> func.HttpResponse:
-    return func.HttpResponse(
-        json.dumps(payload),
-        status_code=status,
-        mimetype="application/json",
-    )
